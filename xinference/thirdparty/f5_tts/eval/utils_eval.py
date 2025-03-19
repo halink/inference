@@ -2,6 +2,7 @@ import math
 import os
 import random
 import string
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -320,7 +321,7 @@ def run_asr_wer(args):
     from zhon.hanzi import punctuation
 
     punctuation_all = punctuation + string.punctuation
-    wers = []
+    wer_results = []
 
     from jiwer import compute_measures
 
@@ -335,8 +336,8 @@ def run_asr_wer(args):
             for segment in segments:
                 hypo = hypo + " " + segment.text
 
-        # raw_truth = truth
-        # raw_hypo = hypo
+        raw_truth = truth
+        raw_hypo = hypo
 
         for x in punctuation_all:
             truth = truth.replace(x, "")
@@ -360,9 +361,16 @@ def run_asr_wer(args):
         # dele = measures["deletions"] / len(ref_list)
         # inse = measures["insertions"] / len(ref_list)
 
-        wers.append(wer)
+        wer_results.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "truth": raw_truth,
+                "hypo": raw_hypo,
+                "wer": wer,
+            }
+        )
 
-    return wers
+    return wer_results
 
 
 # SIM Evaluation
@@ -381,10 +389,10 @@ def run_sim(args):
         model = model.cuda(device)
     model.eval()
 
-    sim_list = []
-    for wav1, wav2, truth in tqdm(test_set):
-        wav1, sr1 = torchaudio.load(wav1)
-        wav2, sr2 = torchaudio.load(wav2)
+    sim_results = []
+    for gen_wav, prompt_wav, truth in tqdm(test_set):
+        wav1, sr1 = torchaudio.load(gen_wav)
+        wav2, sr2 = torchaudio.load(prompt_wav)
 
         resample1 = torchaudio.transforms.Resample(orig_freq=sr1, new_freq=16000)
         resample2 = torchaudio.transforms.Resample(orig_freq=sr2, new_freq=16000)
@@ -400,6 +408,11 @@ def run_sim(args):
 
         sim = F.cosine_similarity(emb1, emb2)[0].item()
         # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")
-        sim_list.append(sim)
+        sim_results.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "sim": sim,
+            }
+        )
 
-    return sim_list
+    return sim_results

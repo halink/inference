@@ -120,10 +120,6 @@ class CFM(nn.Module):
                 text = list_str_to_tensor(text).to(device)
             assert text.shape[0] == batch
 
-        if exists(text):
-            text_lens = (text != -1).sum(dim=-1)
-            lens = torch.maximum(text_lens, lens)  # make sure lengths are at least those of the text characters
-
         # duration
 
         cond_mask = lens_to_mask(lens)
@@ -133,7 +129,9 @@ class CFM(nn.Module):
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
 
-        duration = torch.maximum(lens + 1, duration)  # just add one token so something is generated
+        duration = torch.maximum(
+            torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
+        )  # duration at least text/audio prompt length plus one token, so something is generated
         duration = duration.clamp(max=max_duration)
         max_duration = duration.amax()
 
@@ -142,6 +140,9 @@ class CFM(nn.Module):
             test_cond = F.pad(cond, (0, 0, cond_seq_len, max_duration - 2 * cond_seq_len), value=0.0)
 
         cond = F.pad(cond, (0, 0, 0, max_duration - cond_seq_len), value=0.0)
+        if no_ref_audio:
+            cond = torch.zeros_like(cond)
+
         cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
         cond_mask = cond_mask.unsqueeze(-1)
         step_cond = torch.where(
@@ -153,10 +154,6 @@ class CFM(nn.Module):
         else:  # save memory and speed up, as single inference need no mask currently
             mask = None
 
-        # test for no ref audio
-        if no_ref_audio:
-            cond = torch.zeros_like(cond)
-
         # neural ode
 
         def fn(t, x):
@@ -165,13 +162,13 @@ class CFM(nn.Module):
 
             # predict flow
             pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False
+                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True
             )
             if cfg_strength < 1e-5:
                 return pred
 
             null_pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
+                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True, cache=True
             )
             return pred + (pred - null_pred) * cfg_strength
 
@@ -198,6 +195,7 @@ class CFM(nn.Module):
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+        self.transformer.clear_cache()
 
         sampled = trajectory[-1]
         out = sampled

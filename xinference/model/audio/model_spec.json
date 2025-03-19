@@ -255,7 +255,7 @@
     "model_name": "F5-TTS",
     "model_family": "F5-TTS",
     "model_id": "SWivid/F5-TTS",
-    "model_revision": "4dcc16f297f2ff98a17b3726b16f5de5a5e45672",
+    "model_revision": "d6bd6c3c3ec65c0a3ef25a6d3d09658c5e2817fd",
     "model_ability": "text-to-audio",
     "multilingual": true
   },

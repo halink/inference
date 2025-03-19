@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 # Above allows ruff to ignore E402: module level import not at top of file
 
+import json
 import re
 import tempfile
 from collections import OrderedDict
@@ -40,8 +41,14 @@ from f5_tts.infer.utils_infer import (
 )
 
 
-DEFAULT_TTS_MODEL = "F5-TTS"
+DEFAULT_TTS_MODEL = "F5-TTS_v1"
 tts_model_choice = DEFAULT_TTS_MODEL
+
+DEFAULT_TTS_MODEL_CFG = [
+    "hf://SWivid/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors",
+    "hf://SWivid/F5-TTS/F5TTS_v1_Base/vocab.txt",
+    json.dumps(dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)),
+]
 
 
 # load models
@@ -49,13 +56,15 @@ tts_model_choice = DEFAULT_TTS_MODEL
 vocoder = load_vocoder()
 
 
-def load_f5tts(ckpt_path=str(cached_path("hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors"))):
-    F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+def load_f5tts():
+    ckpt_path = str(cached_path(DEFAULT_TTS_MODEL_CFG[0]))
+    F5TTS_model_cfg = json.loads(DEFAULT_TTS_MODEL_CFG[2])
     return load_model(DiT, F5TTS_model_cfg, ckpt_path)
 
 
-def load_e2tts(ckpt_path=str(cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.safetensors"))):
-    E2TTS_model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
+def load_e2tts():
+    ckpt_path = str(cached_path("hf://SWivid/E2-TTS/E2TTS_Base/model_1200000.safetensors"))
+    E2TTS_model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4, text_mask_padding=False, pe_attn_head=1)
     return load_model(UNetT, E2TTS_model_cfg, ckpt_path)
 
 
@@ -66,7 +75,7 @@ def load_custom(ckpt_path: str, vocab_path="", model_cfg=None):
     if vocab_path.startswith("hf://"):
         vocab_path = str(cached_path(vocab_path))
     if model_cfg is None:
-        model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+        model_cfg = json.loads(DEFAULT_TTS_MODEL_CFG[2])
     return load_model(DiT, model_cfg, ckpt_path, vocab_file=vocab_path)
 
 
@@ -103,11 +112,27 @@ def generate_response(messages, model, tokenizer):
 
 @gpu_decorator
 def infer(
-    ref_audio_orig, ref_text, gen_text, model, remove_silence, cross_fade_duration=0.15, speed=1, show_info=gr.Info
+    ref_audio_orig,
+    ref_text,
+    gen_text,
+    model,
+    remove_silence,
+    cross_fade_duration=0.15,
+    nfe_step=32,
+    speed=1,
+    show_info=gr.Info,
 ):
+    if not ref_audio_orig:
+        gr.Warning("Please provide reference audio.")
+        return gr.update(), gr.update(), ref_text
+
+    if not gen_text.strip():
+        gr.Warning("Please enter text to generate.")
+        return gr.update(), gr.update(), ref_text
+
     ref_audio, ref_text = preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=show_info)
 
-    if model == "F5-TTS":
+    if model == DEFAULT_TTS_MODEL:
         ema_model = F5TTS_ema_model
     elif model == "E2-TTS":
         global E2TTS_ema_model
@@ -120,7 +145,7 @@ def infer(
         global custom_ema_model, pre_custom_path
         if pre_custom_path != model[1]:
             show_info("Loading Custom TTS model...")
-            custom_ema_model = load_custom(model[1], vocab_path=model[2])
+            custom_ema_model = load_custom(model[1], vocab_path=model[2], model_cfg=model[3])
             pre_custom_path = model[1]
         ema_model = custom_ema_model
 
@@ -131,6 +156,7 @@ def infer(
         ema_model,
         vocoder,
         cross_fade_duration=cross_fade_duration,
+        nfe_step=nfe_step,
         speed=speed,
         show_info=show_info,
         progress=gr.Progress(),
@@ -184,6 +210,14 @@ with gr.Blocks() as app_tts:
             step=0.1,
             info="Adjust the speed of the audio.",
         )
+        nfe_slider = gr.Slider(
+            label="NFE Steps",
+            minimum=4,
+            maximum=64,
+            value=32,
+            step=2,
+            info="Set the number of denoising steps.",
+        )
         cross_fade_duration_slider = gr.Slider(
             label="Cross-Fade Duration (s)",
             minimum=0.0,
@@ -203,6 +237,7 @@ with gr.Blocks() as app_tts:
         gen_text_input,
         remove_silence,
         cross_fade_duration_slider,
+        nfe_slider,
         speed_slider,
     ):
         audio_out, spectrogram_path, ref_text_out = infer(
@@ -211,10 +246,11 @@ with gr.Blocks() as app_tts:
             gen_text_input,
             tts_model_choice,
             remove_silence,
-            cross_fade_duration_slider,
-            speed_slider,
+            cross_fade_duration=cross_fade_duration_slider,
+            nfe_step=nfe_slider,
+            speed=speed_slider,
         )
-        return audio_out, spectrogram_path, gr.update(value=ref_text_out)
+        return audio_out, spectrogram_path, ref_text_out
 
     generate_btn.click(
         basic_tts,
@@ -224,6 +260,7 @@ with gr.Blocks() as app_tts:
             gen_text_input,
             remove_silence,
             cross_fade_duration_slider,
+            nfe_slider,
             speed_slider,
         ],
         outputs=[audio_output, spectrogram_output, ref_text_input],
@@ -293,7 +330,7 @@ with gr.Blocks() as app_multistyle:
     )
 
     # Regular speech type (mandatory)
-    with gr.Row():
+    with gr.Row() as regular_row:
         with gr.Column():
             regular_name = gr.Textbox(value="Regular", label="Speech Type Name")
             regular_insert = gr.Button("Insert Label", variant="secondary")
@@ -302,12 +339,12 @@ with gr.Blocks() as app_multistyle:
 
     # Regular speech type (max 100)
     max_speech_types = 100
-    speech_type_rows = []  # 99
-    speech_type_names = [regular_name]  # 100
-    speech_type_audios = [regular_audio]  # 100
-    speech_type_ref_texts = [regular_ref_text]  # 100
-    speech_type_delete_btns = []  # 99
-    speech_type_insert_btns = [regular_insert]  # 100
+    speech_type_rows = [regular_row]
+    speech_type_names = [regular_name]
+    speech_type_audios = [regular_audio]
+    speech_type_ref_texts = [regular_ref_text]
+    speech_type_delete_btns = [None]
+    speech_type_insert_btns = [regular_insert]
 
     # Additional speech types (99 more)
     for i in range(max_speech_types - 1):
@@ -328,51 +365,32 @@ with gr.Blocks() as app_multistyle:
     # Button to add speech type
     add_speech_type_btn = gr.Button("Add Speech Type")
 
-    # Keep track of current number of speech types
-    speech_type_count = gr.State(value=1)
+    # Keep track of autoincrement of speech types, no roll back
+    speech_type_count = 1
 
     # Function to add a speech type
-    def add_speech_type_fn(speech_type_count):
+    def add_speech_type_fn():
+        row_updates = [gr.update() for _ in range(max_speech_types)]
+        global speech_type_count
         if speech_type_count < max_speech_types:
+            row_updates[speech_type_count] = gr.update(visible=True)
             speech_type_count += 1
-            # Prepare updates for the rows
-            row_updates = []
-            for i in range(1, max_speech_types):
-                if i < speech_type_count:
-                    row_updates.append(gr.update(visible=True))
-                else:
-                    row_updates.append(gr.update())
         else:
-            # Optionally, show a warning
-            row_updates = [gr.update() for _ in range(1, max_speech_types)]
-        return [speech_type_count] + row_updates
+            gr.Warning("Exhausted maximum number of speech types. Consider restart the app.")
+        return row_updates
 
-    add_speech_type_btn.click(
-        add_speech_type_fn, inputs=speech_type_count, outputs=[speech_type_count] + speech_type_rows
-    )
+    add_speech_type_btn.click(add_speech_type_fn, outputs=speech_type_rows)
 
     # Function to delete a speech type
-    def make_delete_speech_type_fn(index):
-        def delete_speech_type_fn(speech_type_count):
-            # Prepare updates
-            row_updates = []
-
-            for i in range(1, max_speech_types):
-                if i == index:
-                    row_updates.append(gr.update(visible=False))
-                else:
-                    row_updates.append(gr.update())
-
-            speech_type_count = max(1, speech_type_count)
-
-            return [speech_type_count] + row_updates
-
-        return delete_speech_type_fn
+    def delete_speech_type_fn():
+        return gr.update(visible=False), None, None, None
 
     # Update delete button clicks
-    for i, delete_btn in enumerate(speech_type_delete_btns):
-        delete_fn = make_delete_speech_type_fn(i)
-        delete_btn.click(delete_fn, inputs=speech_type_count, outputs=[speech_type_count] + speech_type_rows)
+    for i in range(1, len(speech_type_delete_btns)):
+        speech_type_delete_btns[i].click(
+            delete_speech_type_fn,
+            outputs=[speech_type_rows[i], speech_type_names[i], speech_type_audios[i], speech_type_ref_texts[i]],
+        )
 
     # Text input for the prompt
     gen_text_input_multistyle = gr.Textbox(
@@ -386,7 +404,7 @@ with gr.Blocks() as app_multistyle:
             current_text = current_text or ""
             speech_type_name = speech_type_name or "None"
             updated_text = current_text + f"{{{speech_type_name}}} "
-            return gr.update(value=updated_text)
+            return updated_text
 
         return insert_speech_type_fn
 
@@ -446,10 +464,14 @@ with gr.Blocks() as app_multistyle:
             if style in speech_types:
                 current_style = style
             else:
-                # If style not available, default to Regular
+                gr.Warning(f"Type {style} is not available, will use Regular as default.")
                 current_style = "Regular"
 
-            ref_audio = speech_types[current_style]["audio"]
+            try:
+                ref_audio = speech_types[current_style]["audio"]
+            except KeyError:
+                gr.Warning(f"Please provide reference audio for type {current_style}.")
+                return [None] + [speech_types[style]["ref_text"] for style in speech_types]
             ref_text = speech_types[current_style].get("ref_text", "")
 
             # Generate speech for this segment
@@ -464,12 +486,10 @@ with gr.Blocks() as app_multistyle:
         # Concatenate all audio segments
         if generated_audio_segments:
             final_audio_data = np.concatenate(generated_audio_segments)
-            return [(sr, final_audio_data)] + [
-                gr.update(value=speech_types[style]["ref_text"]) for style in speech_types
-            ]
+            return [(sr, final_audio_data)] + [speech_types[style]["ref_text"] for style in speech_types]
         else:
             gr.Warning("No audio generated.")
-            return [None] + [gr.update(value=speech_types[style]["ref_text"]) for style in speech_types]
+            return [None] + [speech_types[style]["ref_text"] for style in speech_types]
 
     generate_multistyle_btn.click(
         generate_multistyle_speech,
@@ -487,7 +507,7 @@ with gr.Blocks() as app_multistyle:
 
     # Validation function to disable Generate button if speech types are missing
     def validate_speech_types(gen_text, regular_name, *args):
-        speech_type_names_list = args[:max_speech_types]
+        speech_type_names_list = args
 
         # Collect the speech types names
         speech_types_available = set()
@@ -651,7 +671,7 @@ Have a conversation with an AI using your reference voice!
                 speed=1.0,
                 show_info=print,  # show_info=print no pull to top when generating
             )
-            return audio_result, gr.update(value=ref_text_out)
+            return audio_result, ref_text_out
 
         def clear_conversation():
             """Reset the conversation"""
@@ -728,50 +748,54 @@ Have a conversation with an AI using your reference voice!
 
 with gr.Blocks() as app:
     gr.Markdown(
-        """
+        f"""
 # E2/F5 TTS
 
-This is a local web UI for F5 TTS with advanced batch processing support. This app supports the following TTS models:
+This is {"a local web UI for [F5 TTS](https://github.com/SWivid/F5-TTS)" if not USING_SPACES else "an online demo for [F5-TTS](https://github.com/SWivid/F5-TTS)"} with advanced batch processing support. This app supports the following TTS models:
 
 * [F5-TTS](https://arxiv.org/abs/2410.06885) (A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching)
 * [E2 TTS](https://arxiv.org/abs/2406.18009) (Embarrassingly Easy Fully Non-Autoregressive Zero-Shot TTS)
 
 The checkpoints currently support English and Chinese.
 
-If you're having issues, try converting your reference audio to WAV or MP3, clipping it to 15s with  ✂  in the bottom right corner (otherwise might have non-optimal auto-trimmed result).
+If you're having issues, try converting your reference audio to WAV or MP3, clipping it to 12s with  ✂  in the bottom right corner (otherwise might have non-optimal auto-trimmed result).
 
-**NOTE: Reference text will be automatically transcribed with Whisper if not provided. For best results, keep your reference clips short (<15s). Ensure the audio is fully uploaded before generating.**
+**NOTE: Reference text will be automatically transcribed with Whisper if not provided. For best results, keep your reference clips short (<12s). Ensure the audio is fully uploaded before generating.**
 """
     )
 
-    last_used_custom = files("f5_tts").joinpath("infer/.cache/last_used_custom.txt")
+    last_used_custom = files("f5_tts").joinpath("infer/.cache/last_used_custom_model_info_v1.txt")
 
     def load_last_used_custom():
         try:
-            with open(last_used_custom, "r") as f:
-                return f.read().split(",")
+            custom = []
+            with open(last_used_custom, "r", encoding="utf-8") as f:
+                for line in f:
+                    custom.append(line.strip())
+            return custom
         except FileNotFoundError:
             last_used_custom.parent.mkdir(parents=True, exist_ok=True)
-            return [
-                "hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors",
-                "hf://SWivid/F5-TTS/F5TTS_Base/vocab.txt",
-            ]
+            return DEFAULT_TTS_MODEL_CFG
 
     def switch_tts_model(new_choice):
         global tts_model_choice
         if new_choice == "Custom":  # override in case webpage is refreshed
-            custom_ckpt_path, custom_vocab_path = load_last_used_custom()
-            tts_model_choice = ["Custom", custom_ckpt_path, custom_vocab_path]
-            return gr.update(visible=True, value=custom_ckpt_path), gr.update(visible=True, value=custom_vocab_path)
+            custom_ckpt_path, custom_vocab_path, custom_model_cfg = load_last_used_custom()
+            tts_model_choice = ["Custom", custom_ckpt_path, custom_vocab_path, json.loads(custom_model_cfg)]
+            return (
+                gr.update(visible=True, value=custom_ckpt_path),
+                gr.update(visible=True, value=custom_vocab_path),
+                gr.update(visible=True, value=custom_model_cfg),
+            )
         else:
             tts_model_choice = new_choice
-            return gr.update(visible=False), gr.update(visible=False)
+            return gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
-    def set_custom_model(custom_ckpt_path, custom_vocab_path):
+    def set_custom_model(custom_ckpt_path, custom_vocab_path, custom_model_cfg):
         global tts_model_choice
-        tts_model_choice = ["Custom", custom_ckpt_path, custom_vocab_path]
-        with open(last_used_custom, "w") as f:
-            f.write(f"{custom_ckpt_path},{custom_vocab_path}")
+        tts_model_choice = ["Custom", custom_ckpt_path, custom_vocab_path, json.loads(custom_model_cfg)]
+        with open(last_used_custom, "w", encoding="utf-8") as f:
+            f.write(custom_ckpt_path + "\n" + custom_vocab_path + "\n" + custom_model_cfg + "\n")
 
     with gr.Row():
         if not USING_SPACES:
@@ -783,34 +807,72 @@ If you're having issues, try converting your reference audio to WAV or MP3, clip
                 choices=[DEFAULT_TTS_MODEL, "E2-TTS"], label="Choose TTS Model", value=DEFAULT_TTS_MODEL
             )
         custom_ckpt_path = gr.Dropdown(
-            choices=["hf://SWivid/F5-TTS/F5TTS_Base/model_1200000.safetensors"],
+            choices=[DEFAULT_TTS_MODEL_CFG[0]],
             value=load_last_used_custom()[0],
             allow_custom_value=True,
-            label="MODEL CKPT: local_path | hf://user_id/repo_id/model_ckpt",
+            label="Model: local_path | hf://user_id/repo_id/model_ckpt",
             visible=False,
         )
         custom_vocab_path = gr.Dropdown(
-            choices=["hf://SWivid/F5-TTS/F5TTS_Base/vocab.txt"],
+            choices=[DEFAULT_TTS_MODEL_CFG[1]],
             value=load_last_used_custom()[1],
             allow_custom_value=True,
-            label="VOCAB FILE: local_path | hf://user_id/repo_id/vocab_file",
+            label="Vocab: local_path | hf://user_id/repo_id/vocab_file",
+            visible=False,
+        )
+        custom_model_cfg = gr.Dropdown(
+            choices=[
+                DEFAULT_TTS_MODEL_CFG[2],
+                json.dumps(
+                    dict(
+                        dim=1024,
+                        depth=22,
+                        heads=16,
+                        ff_mult=2,
+                        text_dim=512,
+                        text_mask_padding=False,
+                        conv_layers=4,
+                        pe_attn_head=1,
+                    )
+                ),
+                json.dumps(
+                    dict(
+                        dim=768,
+                        depth=18,
+                        heads=12,
+                        ff_mult=2,
+                        text_dim=512,
+                        text_mask_padding=False,
+                        conv_layers=4,
+                        pe_attn_head=1,
+                    )
+                ),
+            ],
+            value=load_last_used_custom()[2],
+            allow_custom_value=True,
+            label="Config: in a dictionary form",
             visible=False,
         )
 
     choose_tts_model.change(
         switch_tts_model,
         inputs=[choose_tts_model],
-        outputs=[custom_ckpt_path, custom_vocab_path],
+        outputs=[custom_ckpt_path, custom_vocab_path, custom_model_cfg],
         show_progress="hidden",
     )
     custom_ckpt_path.change(
         set_custom_model,
-        inputs=[custom_ckpt_path, custom_vocab_path],
+        inputs=[custom_ckpt_path, custom_vocab_path, custom_model_cfg],
         show_progress="hidden",
     )
     custom_vocab_path.change(
         set_custom_model,
-        inputs=[custom_ckpt_path, custom_vocab_path],
+        inputs=[custom_ckpt_path, custom_vocab_path, custom_model_cfg],
+        show_progress="hidden",
+    )
+    custom_model_cfg.change(
+        set_custom_model,
+        inputs=[custom_ckpt_path, custom_vocab_path, custom_model_cfg],
         show_progress="hidden",
     )
 
@@ -838,10 +900,24 @@ If you're having issues, try converting your reference audio to WAV or MP3, clip
     type=str,
     help='The root path (or "mount point") of the application, if it\'s not served from the root ("/") of the domain. Often used when the application is behind a reverse proxy that forwards requests to the application, e.g. set "/myapp" or full URL for application served at "https://example.com/myapp".',
 )
-def main(port, host, share, api, root_path):
+@click.option(
+    "--inbrowser",
+    "-i",
+    is_flag=True,
+    default=False,
+    help="Automatically launch the interface in the default web browser",
+)
+def main(port, host, share, api, root_path, inbrowser):
     global app
     print("Starting app...")
-    app.queue(api_open=api).launch(server_name=host, server_port=port, share=share, show_api=api, root_path=root_path)
+    app.queue(api_open=api).launch(
+        server_name=host,
+        server_port=port,
+        share=share,
+        show_api=api,
+        root_path=root_path,
+        inbrowser=inbrowser,
+    )
 
 
 if __name__ == "__main__":

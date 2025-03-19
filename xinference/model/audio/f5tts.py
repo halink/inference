@@ -69,15 +69,13 @@ class F5TTSModel:
             self._vocoder = load_vocoder(vocoder_name=vocoder_name, is_local=False)
 
         model_cls = DiT
-        model_cfg = dict(
-            dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4
-        )
+        model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, text_mask_padding=True, qk_norm=None,
+                         conv_layers=4, pe_attn_head=None, checkpoint_activations=False)
+        ckpt_step = 1250000
         if vocoder_name == "vocos":
-            exp_name = "F5TTS_Base"
-            ckpt_step = 1200000
+            exp_name = "F5TTS_v1_Base"
         elif vocoder_name == "bigvgan":
             exp_name = "F5TTS_Base_bigvgan"
-            ckpt_step = 1250000
         else:
             assert False
         ckpt_file = os.path.join(
